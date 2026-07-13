@@ -27,6 +27,8 @@ def main():
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--window_type", type=str, default=None, choices=[None, "day", "week", "month"])
 
+    ap.add_argument("--ph_lambda", type=float, default=0.05)
+
     ap.add_argument("--save_excel", type=bool, default=False)
     ap.add_argument("--excel_path", type=str, default="./runs/window_metrics.xlsx")
     ap.add_argument("--save_checkpoint", action="store_true")
@@ -109,14 +111,14 @@ def main():
     )
 
     #ph = PageHinkleyDriftDetector(burn_in_windows=6, lambda_ph=0.05)
-    ph = PageHinkleyDriftDetector(burn_in_windows=6, lambda_ph=1e9)
+    ph = PageHinkleyDriftDetector(burn_in_windows=6, lambda_ph=args.ph_lambda)
 
     # parameters for novelty buffer manager
     buf = NoveltyBufferManager(
         min_total_unseen_samples=30,
-        min_unseen_samples_per_class=1,
+        min_unseen_samples_per_class=100000,
         max_total_unseen_samples=100000,
-        min_unseen_ratio_in_window=0.01,
+        min_unseen_ratio_in_window=0.999,
         max_wait_windows_since_first_unseen=50
     )
 

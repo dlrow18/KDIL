@@ -5,6 +5,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from sklearn.metrics import precision_recall_fscore_support
 
+
 # Basic LSTM for next-activity prediction
 class LSTMClassifier(nn.Module):
 
@@ -77,11 +78,13 @@ def _labels_to_index(labels: torch.Tensor) -> torch.Tensor:
         return labels.argmax(dim=1)
     return labels
 
+
+
+# Compute weighted Precision / Recall / F1 using sklearn.
+# Unknown label (-1) is treated as wrong.
+# preds: predictions / gts: ground-truth
 def compute_prf1_weighted_sklearn(preds: torch.Tensor, gts: torch.Tensor):
-    """
-    Compute weighted Precision / Recall / F1 using sklearn.
-    Unknown label (-1) is treated as a normal class (thus always wrong).
-    """
+
     if len(preds) == 0 or len(gts) == 0:
         return 0.0, 0.0, 0.0
 
@@ -179,7 +182,6 @@ def train_model(model, dataloader, epochs=100, lr=0.002, patience=10, device=Non
         else:
             bad += 1
 
-        # print(f"Epoch {epoch:03d} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.4f} | bad={bad}/{patience}")
         print(f"Epoch {epoch:03d} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.4f}")
 
         if bad >= patience:
@@ -213,226 +215,9 @@ def predict_model(model, test_dataloader, device=None):
 
     preds = torch.cat(preds) if preds else torch.tensor([])
     gts = torch.cat(gts) if gts else torch.tensor([])
-    #acc = float((preds == gts).float().mean().item()) if len(preds) else 0.0
+
     correct = (preds == gts).sum().item()
     total = len(gts)
     acc = correct / total if total > 0 else 0.0
 
     return acc, preds, gts
-
-
-
-
-
-'''
-class LSTMClassifier(nn.Module):
-    def __init__(self, vocab_size, embedding_dim=64, hidden_dim=128, num_classes=10, padding_idx=0):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=padding_idx)
-        self.lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
-        self.classifier = nn.Linear(hidden_dim, num_classes)
-
-    def forward(self, input_ids: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        """
-        Returns:
-            logits: FloatTensor [B, num_classes]
-        """
-        embedded = self.embedding(input_ids)  # [B, T, E]
-        packed = pack_padded_sequence(embedded, lengths.cpu(), batch_first=True, enforce_sorted=False)
-        _, (hidden, _) = self.lstm(packed)
-
-        # hidden: [num_layers, B, H] -> take last layer
-        features = hidden[-1]               # [B, H]
-        logits = self.classifier(features)  # [B, C]
-        return logits
-
-    def save_model(self, path: str):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save({
-            "model_state_dict": self.state_dict(),
-            "vocab_size": int(self.embedding.num_embeddings),
-            "num_classes": int(self.classifier.out_features),
-            "embedding_dim": int(self.embedding.embedding_dim),
-            "hidden_dim": int(self.lstm.hidden_size),
-        }, path)
-
-def train_model(model, dataloader, epochs=100, lr=0.002, patience=10, device=None):
-    """
-        Train the model on the given dataset.
-
-        Args:
-            dataloader: DataLoader with training and validation batches.
-            lr: Learning rate for the optimizer.
-            epochs: Number of training epochs.
-            device: 'cpu' or 'cuda' if GPU available.
-        """
-
-    # Split dataset into training and validation sets
-    dataset = dataloader.dataset
-    dataset_size = len(dataset)
-    valid_size = int(dataset_size * 0.2)
-    train_size = dataset_size - valid_size
-
-    train_dataset, valid_dataset = random_split(dataset, [train_size, valid_size])
-
-    # Create training and validation data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=dataloader.batch_size,
-        shuffle=True,
-        num_workers=dataloader.num_workers if hasattr(dataloader, 'num_workers') else 0
-    )
-
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=dataloader.batch_size,
-        shuffle=False,
-        num_workers=dataloader.num_workers if hasattr(dataloader, 'num_workers') else 0
-    )
-
-    print(f"Split dataset: {train_size} training samples, {valid_size} validation samples")
-
-    # Move model to device
-    model.to(device)
-
-    # optimizer = optim.Adam(model.parameters(), lr=lr)
-    optimizer = optim.NAdam(
-        model.parameters(),
-        lr=lr,
-        betas=(0.9, 0.999),
-        eps=1e-08,
-        weight_decay=0,
-        momentum_decay=0.004
-    )
-    loss_fn = nn.CrossEntropyLoss()
-
-    # Training loop
-    best_valid_loss = float('inf')
-    patience_counter = 0
-    training_stats = {'train_loss': [], 'val_loss': [], 'val_acc': []}
-
-    for epoch in range(epochs):
-        model.train()
-        epoch_loss = 0
-        for inputs, labels, _ in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-
-            optimizer.zero_grad()
-            outputs = model(inputs)
-
-            # Handle one-hot encoded labels
-            if labels.ndim == 2:
-                labels = labels.argmax(dim=1)
-
-            loss = loss_fn(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-
-        avg_train_loss = epoch_loss / len(train_loader)
-        training_stats['train_loss'].append(avg_train_loss)
-
-        # Validation phase
-        valid_loss, valid_acc = evaluate_model(model, valid_loader, loss_fn)
-        training_stats['val_loss'].append(valid_loss)
-        training_stats['val_acc'].append(valid_acc)
-
-        # Early stopping
-        if valid_loss < best_valid_loss:
-            best_val_loss = valid_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-
-        if patience_counter >= patience:
-            print(f"Early stopping at epoch {epoch + 1}")
-            break
-
-        print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {avg_train_loss:.4f}, "
-              f"Val Loss: {valid_loss:.4f}, Val Acc: {valid_acc:.4f}")
-
-    return model, training_stats
-
-
-def evaluate_model(model, val_loader, loss_fn=None):
-    """Evaluate the model on a dataset.
-
-    Args:
-        model: The model to be evaluated.
-        dataloader: DataLoader with validation batches.
-        criterion: Loss function.
-    """
-    device = next(model.parameters()).device
-    model.eval()
-    total_loss = 0
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for inputs, labels, _ in val_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-
-            outputs = model(inputs)
-            if labels.ndim == 2:
-                labels = labels.argmax(dim=1)
-            loss = loss_fn(outputs, labels) if loss_fn else 0
-            total_loss += loss.item()
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    avg_loss = total_loss / len(val_loader) if len(val_loader) > 0 else 0
-    accuracy = correct / total if total > 0 else 0
-
-    return avg_loss, accuracy
-
-
-def predict_model(model, test_dataloader, device=None):
-    """Predict the model on the given dataset.
-
-    Args:
-        model: The model to be predicted.
-        test_dataloader: DataLoader with test batches.
-        device: Device to use for computations.
-
-    Returns:
-        Tuple of (accuracy, predictions, ground_truth)
-    """
-    device = next(model.parameters()).device
-    model.to(device)
-    model.eval()
-    predictions = []
-    ground_truth = []
-
-    try:
-        with torch.no_grad():
-            for inputs, labels, _ in test_dataloader:
-                if labels.ndim == 2:
-                    labels = labels.argmax(dim=1)
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                _, predicted = torch.max(outputs, 1)
-                predictions.append(predicted)
-                ground_truth.append(labels)
-    except Exception as e:
-        print(f"Error during prediction: {e}")
-        print(f"Model vocabulary size: {len(model.embed.vocab)}")
-        print(f"Model output classes: {model.classifier.out_features}")
-        raise
-
-    # Compute accuracy
-    if not predictions or not ground_truth:
-        return 0.0, torch.tensor([]), torch.tensor([])
-
-    try:
-        all_predictions = torch.cat(predictions)
-        all_ground_truth = torch.cat(ground_truth)
-        correct = (all_predictions == all_ground_truth).sum().item()
-        total = all_ground_truth.size(0)
-        accuracy = correct / total if total > 0 else 0.0
-
-        return accuracy, all_predictions, all_ground_truth
-    except Exception as e:
-        print(f"Error computing accuracy: {e}")
-        return 0.0, torch.tensor([]), torch.tensor([])
-'''
