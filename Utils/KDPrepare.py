@@ -1,38 +1,23 @@
-# Utils/incremental_kd.py
 from __future__ import annotations
-
 import copy
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
-
 import pandas as pd
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 
 
-UNK_TOKEN = "[UNK]"
+# UNK_TOKEN = "[UNK]"
 
-
+# D_unseen: new examples with unseen token/labels
 @dataclass
 class IncrementalKDBatch:
     novel_df: pd.DataFrame
-    teacher_df: pd.DataFrame
     stable_df: pd.DataFrame
-    stable_teacher_df: pd.DataFrame
     new_tokens: List[str]
     new_labels: List[str]
 
-
-def ensure_unk_token(vocab_mapper, unk_token: str = UNK_TOKEN) -> int:
-    """
-    Ensure UNK exists in token_vocab.
-    Returns UNK token id.
-    """
-    if unk_token not in vocab_mapper.token_vocab:
-        vocab_mapper.token_vocab[unk_token] = len(vocab_mapper.token_vocab)
-    return vocab_mapper.token_vocab[unk_token]
-
-
+# Extract new tokens and labels from D_unseen that are not in old vocabularies.
 def _extract_new_tokens_and_labels(
     novel_df: pd.DataFrame,
     old_token_vocab: Dict[str, int],
@@ -56,36 +41,57 @@ def _extract_new_tokens_and_labels(
     return new_tokens, new_labels
 
 
-def build_teacher_aligned_df(
-    novel_df: pd.DataFrame,
+def prepare_novel_kd_batch(
+    unseen_buffer_df: pd.DataFrame,
+    trigger_window_df: pd.DataFrame,
     old_token_vocab: Dict[str, int],
-    unk_token: str = UNK_TOKEN,
-) -> pd.DataFrame:
+    old_label_vocab: Dict[str, int],
+) -> IncrementalKDBatch:
     """
-    Replace unseen tokens in prefix with [UNK] for teacher input.
+    Build data for the two-phase incremental update.
+
+    - novel_df:
+        D_novel from the unseen-event buffer.
+        Used for CE-based adaptation.
+
+    - stable_df:
+        D_stable from the trigger window.
+        Contains only old-token prefixes and old labels.
+        Used for old-class knowledge distillation.
+
+    - new_tokens / new_labels:
+        Newly observed activities in prefixes and target labels.
     """
-    df = novel_df.copy()
+    novel_df = unseen_buffer_df.copy().reset_index(drop=True)
 
-    aligned_prefixes = []
-    for p in df["prefix"].astype(str).tolist():
-        toks = p.split()
-        toks = [tok if tok in old_token_vocab else unk_token for tok in toks]
-        aligned_prefixes.append(" ".join(toks))
+    new_tokens, new_labels = _extract_new_tokens_and_labels(
+        novel_df=novel_df,
+        old_token_vocab=old_token_vocab,
+        old_label_vocab=old_label_vocab,
+    )
 
-    df["prefix"] = aligned_prefixes
-    return df
+    stable_df = build_stable_df(
+        trigger_window_df=trigger_window_df,
+        old_token_vocab=old_token_vocab,
+        old_label_vocab=old_label_vocab,
+    )
+
+    return IncrementalKDBatch(
+        novel_df=novel_df,
+        stable_df=stable_df,
+        new_tokens=new_tokens,
+        new_labels=new_labels,
+    )
 
 
+# Build D_stable from trigger window: only examples where prefix has all old tokens and next_act is an old label.
+# Stable means "seen" in the current model
 def build_stable_df(
     trigger_window_df: pd.DataFrame,
     old_token_vocab: Dict[str, int],
     old_label_vocab: Dict[str, int],
 ) -> pd.DataFrame:
-    """
-    D_stable:
-      prefix contains only old tokens
-      and next_act is an old label
-    """
+
     stable_rows = []
 
     for _, row in trigger_window_df.iterrows():
@@ -104,58 +110,7 @@ def build_stable_df(
 
     return pd.DataFrame(stable_rows).reset_index(drop=True)
 
-
-def prepare_novel_kd_batch(
-    unseen_buffer_df: pd.DataFrame,
-    trigger_window_df: pd.DataFrame,
-    old_token_vocab: Dict[str, int],
-    old_label_vocab: Dict[str, int],
-    unk_token: str = UNK_TOKEN,
-) -> IncrementalKDBatch:
-    """
-    Build:
-      - novel_df: raw student-side D_novel
-      - teacher_df: teacher-aligned D_novel with unseen tokens -> [UNK]
-      - stable_df: D_stable from current trigger window
-      - stable_teacher_df: teacher-aligned stable data (usually same as stable_df)
-      - new_tokens/new_labels
-    """
-    novel_df = unseen_buffer_df.copy().reset_index(drop=True)
-
-    new_tokens, new_labels = _extract_new_tokens_and_labels(
-        novel_df=novel_df,
-        old_token_vocab=old_token_vocab,
-        old_label_vocab=old_label_vocab,
-    )
-
-    teacher_df = build_teacher_aligned_df(
-        novel_df=novel_df,
-        old_token_vocab=old_token_vocab,
-        unk_token=unk_token,
-    )
-
-    stable_df = build_stable_df(
-        trigger_window_df=trigger_window_df,
-        old_token_vocab=old_token_vocab,
-        old_label_vocab=old_label_vocab,
-    )
-
-    stable_teacher_df = build_teacher_aligned_df(
-        novel_df=stable_df,
-        old_token_vocab=old_token_vocab,
-        unk_token=unk_token,
-    )
-
-    return IncrementalKDBatch(
-        novel_df=novel_df,
-        teacher_df=teacher_df,
-        stable_df=stable_df,
-        stable_teacher_df=stable_teacher_df,
-        new_tokens=new_tokens,
-        new_labels=new_labels,
-    )
-
-
+# Encode a dataframe into a DataLoader using the given vocab_mapper.
 def encode_df_with_given_vocab(
     df: pd.DataFrame,
     vocab_mapper,
@@ -211,11 +166,9 @@ def encode_df_with_given_vocab(
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
 
 
+# Build teacher and student models by copying the original model. Teacher is frozen and student is expanded with new vocab sizes.
 def build_teacher_student_models(model, new_vocab_size: int, new_num_classes: int, device=None):
-    """
-    teacher: frozen copy of current model
-    student: copy of current model, then expanded
-    """
+
     teacher = copy.deepcopy(model)
     student = copy.deepcopy(model)
 
