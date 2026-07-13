@@ -1,13 +1,9 @@
-pandas
-pm4py
-packaging
+usage:
+
+pip install -r requirements.txt
 
 python DataPreProcess.py --dataset BPIC15_2
 
-python DriftDetectorTest.py --dataset helpdesk --window_type month
-
 python KDTest.py --dataset BPIC15_2 --window_type month
 
-python KDTest.py --dataset BPIC15_2 --window_type month --save_excel True
-
-python Plot_metrics.py  --excel_path runs/window_metrics.xlsx --output_dir figures 
+python KDTest.py --dataset BPIC15_2 --window_type month --save_excel True 
